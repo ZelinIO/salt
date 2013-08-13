@@ -69,13 +69,9 @@ def manage_mode(mode):
 
         salt '*' config.manage_mode
     '''
-    if mode:
-        mode = str(mode).lstrip('0')
-        if not mode:
-            return '0'
-        else:
-            return mode
-    return mode
+    if mode is None:
+        return None
+    return str(mode).lstrip('0').zfill(3)
 
 
 def valid_fileproto(uri):
@@ -120,6 +116,58 @@ def option(
     return default
 
 
+def merge(value,
+          default='',
+          omit_opts=False,
+          omit_master=False,
+          omit_pillar=False):
+    '''
+    Retrieves an option based on key, merging all matches.
+
+    Same as ``option()`` except that it merges all matches, rather than taking
+    the first match.
+
+    CLI Example::
+
+        salt '*' config.merge schedule
+    '''
+    ret = None
+    if not omit_opts:
+        if value in __opts__:
+            ret = __opts__[value]
+            if isinstance(ret, str):
+                return ret
+    if not omit_master:
+        if value in __pillar__.get('master', {}):
+            tmp = __pillar__['master'][value]
+            if ret is None:
+                ret = tmp
+                if isinstance(ret, str):
+                    return ret
+            elif isinstance(ret, dict) and isinstance(tmp, dict):
+                tmp.update(ret)
+                ret = tmp
+            elif isinstance(ret, (list, tuple)) and isinstance(tmp,
+                                                               (list, tuple)):
+                ret = list(ret) + list(tmp)
+    if not omit_pillar:
+        if value in __pillar__:
+            tmp = __pillar__[value]
+            if ret is None:
+                ret = tmp
+                if isinstance(ret, str):
+                    return ret
+            elif isinstance(ret, dict) and isinstance(tmp, dict):
+                tmp.update(ret)
+                ret = tmp
+            elif isinstance(ret, (list, tuple)) and isinstance(tmp,
+                                                               (list, tuple)):
+                ret = list(ret) + list(tmp)
+    if ret is None and value in DEFAULTS:
+        return DEFAULTS[value]
+    return ret or default
+
+
 def get(key, default=''):
     '''
     .. versionadded: 0.14
@@ -147,7 +195,7 @@ def get(key, default=''):
 
     CLI Example::
 
-        salt '*' pillar.get pkg:apache
+        salt '*' config.get pkg:apache
     '''
     ret = salt.utils.traverse_dict(__opts__, key, '_|-')
     if ret != '_|-':

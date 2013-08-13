@@ -122,8 +122,11 @@ class SMaster(object):
             )
             cumask = os.umask(191)
             if user not in users:
-                log.error('ACL user {0} is not available'.format(user))
-                continue
+                try:
+                    founduser = pwd.getpwnam(user)
+                except KeyError:
+                    log.error('ACL user {0} is not available'.format(user))
+                    continue
             keyfile = os.path.join(
                 self.opts['cachedir'], '.{0}_key'.format(user)
             )
@@ -193,7 +196,7 @@ class Master(SMaster):
                                     self.opts['keep_jobs']:
                                 shutil.rmtree(f_path)
 
-            if self.opts.get('publish_sesion'):
+            if self.opts.get('publish_session'):
                 if now - rotate >= self.opts['publish_session'] * 60:
                     salt.crypt.dropfile(self.opts['cachedir'])
                     rotate = now
@@ -740,10 +743,10 @@ class AESFuncs(object):
             # The minion is not who it says it is!
             # We don't want to listen to it!
             log.warn(
-                ('Minion id {0} is not who it says it is and is attempting '
-                 'to issue a peer command').format(
-                    clear_load['id']
-                )
+                (
+                    'Minion id {0} is not who it says it is and is attempting '
+                    'to issue a peer command'
+                ).format(clear_load['id'])
             )
             return False
         perms = []
@@ -886,7 +889,7 @@ class AESFuncs(object):
             return False
         if not salt.utils.verify.valid_id(load['id']):
             return False
-        if self.opts.get('minion_data_cache', False):
+        if self.opts.get('minion_data_cache', False) or self.opts.get('enforce_mine_cache', False):
             cdir = os.path.join(self.opts['cachedir'], 'minions', load['id'])
             if not os.path.isdir(cdir):
                 os.makedirs(cdir)
@@ -1322,10 +1325,10 @@ class AESFuncs(object):
             # The minion is not who it says it is!
             # We don't want to listen to it!
             log.warn(
-                ('Minion id {0} is not who it says it is and is attempting '
-                 'to revoke the key for {0}').format(
-                    load['id']
-                )
+                (
+                    'Minion id {0} is not who it says it is and is attempting '
+                    'to revoke the key for {0}'
+                ).format(load['id'])
             )
             return False
         keyapi = salt.key.Key(self.opts)

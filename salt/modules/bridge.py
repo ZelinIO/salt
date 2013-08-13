@@ -7,6 +7,10 @@ import re
 import salt.utils
 
 
+__func_alias__ = {
+    'list_': 'list'
+}
+
 def __virtual__():
     '''
     Confirm this module is supported by the OS and the system has
@@ -70,7 +74,10 @@ def _linux_brshow(br=None):
             brs[brname]['interfaces'].append(vals[0])
 
     if br:
-        return brs[br]
+        try:
+            return brs[br]
+        except KeyError, ke :
+            return None
     return brs
 
 
@@ -147,7 +154,10 @@ def _netbsd_brshow(br=None):
                     brs[brname]['stp'] = 'yes'
 
     if br:
-        return brs[br]
+        try:
+            return brs[br]
+        except KeyError, ke :
+            return None
     return brs
 
 
@@ -231,7 +241,7 @@ def show(br=None):
     return _os_dispatch('brshow', br)
 
 
-def list():
+def list_():
     '''
     Returns the machine's bridges list
 

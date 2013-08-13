@@ -31,7 +31,10 @@ supported. This module will therefore only work on RH/CentOS/Fedora.
         - dns:
           - 8.8.8.8
           - 8.8.4.4
+
+    routes:
       network.routes:
+        - name: eth0
         - routes:
           - name: secure_network
             ipaddr: 10.2.0.0
@@ -148,6 +151,7 @@ supported. This module will therefore only work on RH/CentOS/Fedora.
 
 # Import python libs
 import difflib
+from salt.loader import _create_loader
 
 
 def managed(name, type, enabled=True, **kwargs):
@@ -252,6 +256,10 @@ def managed(name, type, enabled=True, **kwargs):
         ret['comment'] = error.message
         return ret
 
+    load = _create_loader(__opts__, 'grains', 'grain', ext_dirs=False)
+    grains_info = load.gen_grains()
+    __grains__.update(grains_info)
+    __salt__['saltutil.refresh_modules']()
     return ret
 
 

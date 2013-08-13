@@ -3,12 +3,21 @@ Support for YUM
 
 :depends:   - yum Python module
             - rpmUtils Python module
+
+This module uses the python interface to YUM. Note that with a default
+/etc/yum.conf, this will cause messages to be sent to sent to syslog on
+/dev/log, with a log facility of :strong:`LOG_USER`. This is in addition to
+whatever is logged to /var/log/yum.log. See the manpage for ``yum.conf(5)`` for
+information on how to use the ``syslog_facility`` and ``syslog_device`` config
+parameters to configure how syslog is handled, or take the above defaults into
+account when configuring your syslog daemon.
 '''
 
 # Import python libs
 import copy
-import os
 import logging
+import os
+import re
 import yaml
 
 # Import salt libs
@@ -19,6 +28,71 @@ try:
     import yum
     import rpmUtils.arch
     HAS_YUMDEPS = True
+
+    class _YumLogger(yum.rpmtrans.RPMBaseCallback):
+        '''
+        A YUM callback handler that logs failed packages with their associated
+        script output to the minion log, and logs install/remove/update/etc.
+        activity to the yum log (usually /var/log/yum.log).
+
+        See yum.rpmtrans.NoOutputCallBack in the yum package for base
+        implementation.
+        '''
+        def __init__(self):
+            self.messages = {}
+            self.failed = []
+            self.action = {
+                yum.constants.TS_UPDATE: yum._('Updating'),
+                yum.constants.TS_ERASE: yum._('Erasing'),
+                yum.constants.TS_INSTALL: yum._('Installing'),
+                yum.constants.TS_TRUEINSTALL: yum._('Installing'),
+                yum.constants.TS_OBSOLETED: yum._('Obsoleted'),
+                yum.constants.TS_OBSOLETING: yum._('Installing'),
+                yum.constants.TS_UPDATED: yum._('Cleanup'),
+                'repackaging': yum._('Repackaging')
+            }
+            # The fileaction are not translated, most sane IMHO / Tim
+            self.fileaction = {
+                yum.constants.TS_UPDATE: 'Updated',
+                yum.constants.TS_ERASE: 'Erased',
+                yum.constants.TS_INSTALL: 'Installed',
+                yum.constants.TS_TRUEINSTALL: 'Installed',
+                yum.constants.TS_OBSOLETED: 'Obsoleted',
+                yum.constants.TS_OBSOLETING: 'Installed',
+                yum.constants.TS_UPDATED: 'Cleanup'
+            }
+            self.logger = logging.getLogger('yum.filelogging.RPMInstallCallback')
+
+        def event(self, package, action, te_current, te_total, ts_current, ts_total):
+            # This would be used for a progress counter according to Yum docs
+            pass
+
+        def log_accumulated_errors(self):
+            '''
+            Convenience method for logging all messages from failed packages
+            '''
+            for pkg in self.failed:
+                log.error('{0} {1}'.format(pkg, self.messages[pkg]))
+
+        def errorlog(self, msg):
+            # Log any error we receive
+            log.error(msg)
+
+        def filelog(self, package, action):
+            if action == yum.constants.TS_FAILED:
+                self.failed.append(package)
+            else:
+                if action in self.fileaction:
+                    msg = '{0}: {1}'.format(self.fileaction[action], package)
+                else:
+                    msg = '{0}: {1}'.format(package, action)
+                self.logger.info(msg)
+
+        def scriptout(self, package, msgs):
+            # This handler covers ancillary messages coming from the RPM script
+            # Will sometimes contain more detailed error messages.
+            self.messages[package] = msgs
+
 except (ImportError, AttributeError):
     HAS_YUMDEPS = False
 
@@ -56,48 +130,6 @@ def __virtual__():
     elif os_family == 'RedHat' and os_major >= 6:
         return 'pkg'
     return False
-
-
-class _YumErrorLogger(object):
-    '''
-    A YUM callback handler that logs failed packages with their associated
-    script output.
-
-    See yum.rpmtrans.NoOutputCallBack in the yum package for base
-    implementation.
-    '''
-    def __init__(self):
-        self.messages = {}
-        self.failed = []
-
-    def event(self, package, action, te_current, te_total, ts_current, ts_total):
-        # This would be used for a progress counter according to Yum docs
-        pass
-
-    def log_accumulated_errors(self):
-        '''
-        Convenience method for logging all messages from failed packages
-        '''
-        for pkg in self.failed:
-            log.error('{0} {1}'.format(pkg, self.messages[pkg]))
-
-    def errorlog(self, msg):
-        # Log any error we receive
-        log.error(msg)
-
-    def filelog(self, package, action):
-        # TODO: extend this for more conclusive transaction handling for
-        # installs and removes VS. the pkg list compare method used now.
-        #
-        # See yum.constants and yum.rpmtrans.RPMBaseCallback in the yum
-        # package for more information about the received actions.
-        if action == yum.constants.TS_FAILED:
-            self.failed.append(package)
-
-    def scriptout(self, package, msgs):
-        # This handler covers ancillary messages coming from the RPM script
-        # Will sometimes contain more detailed error messages.
-        self.messages[package] = msgs
 
 
 def list_upgrades(refresh=True):
@@ -147,18 +179,18 @@ def _set_repo_options(yumbase, **kwargs):
 
     try:
         if fromrepo:
-            log.info('Restricting to repo \'{0}\''.format(fromrepo))
+            log.info('Restricting to repo {0!r}'.format(fromrepo))
             yumbase.repos.disableRepo('*')
             yumbase.repos.enableRepo(fromrepo)
         else:
             if disablerepo:
-                log.info('Disabling repo \'{0}\''.format(disablerepo))
+                log.info('Disabling repo {0!r}'.format(disablerepo))
                 yumbase.repos.disableRepo(disablerepo)
             if enablerepo:
-                log.info('Enabling repo \'{0}\''.format(enablerepo))
+                log.info('Enabling repo {0!r}'.format(enablerepo))
                 yumbase.repos.enableRepo(enablerepo)
-    except yum.Errors.RepoError as e:
-        return e
+    except yum.Errors.RepoError as exc:
+        return exc
 
 
 def latest_version(*names, **kwargs):
@@ -269,8 +301,9 @@ def list_pkgs(versions_as_list=False, **kwargs):
     yb = yum.YumBase()
     for p in yb.rpmdb:
         name = p.name
-        if __grains__.get('cpuarch', '') == 'x86_64' and p.arch == 'i686':
-            name += '.i686'
+        if __grains__.get('cpuarch', '') == 'x86_64' \
+                and re.match(r'i\d86', p.arch):
+            name += '.{0}'.format(p.arch)
         pkgver = p.version
         if p.release:
             pkgver += '-{0}'.format(p.release)
@@ -400,8 +433,9 @@ def install(name=None,
         software repository. To install a package file manually, use the
         "sources" option.
 
-        32-bit packages can be installed on 64-bit systems by appending
-        ``.i686`` to the end of the package name.
+        32-bit packages can be installed on 64-bit systems by appending the
+        architecture designation (``.i686``, ``.i586``, etc.) to the end of the
+        package name.
 
         CLI Example::
             salt '*' pkg.install <package name>
@@ -503,11 +537,14 @@ def install(name=None,
             else:
                 version = pkg_params[pkgname]
                 if version is not None:
-                    if __grains__.get('cpuarch', '') == 'x86_64' \
-                            and pkgname.endswith('.i686'):
-                        # Remove '.i686' from pkgname
-                        pkgname = pkgname[:-5]
-                        arch = '.i686'
+                    if __grains__.get('cpuarch', '') == 'x86_64':
+                        try:
+                            arch = re.search(r'(\.i\d86)$', pkgname).group(1)
+                        except AttributeError:
+                            arch = ''
+                        else:
+                            # Remove arch from pkgname
+                            pkgname = pkgname[:-len(arch)]
                     else:
                         arch = ''
                     target = '{0}-{1}{2}'.format(pkgname, version, arch)
@@ -529,7 +566,7 @@ def install(name=None,
         log.info('Resolving dependencies')
         yumbase.resolveDeps()
         log.info('Processing transaction')
-        yumlogger = _YumErrorLogger()
+        yumlogger = _YumLogger()
         yumbase.processTransaction(rpmDisplay=yumlogger)
         yumlogger.log_accumulated_errors()
         yumbase.closeRpmDB()
@@ -569,8 +606,8 @@ def upgrade(refresh=True):
         yumbase.update()
         log.info('Resolving dependencies')
         yumbase.resolveDeps()
-        yumlogger = _YumErrorLogger()
         log.info('Processing transaction')
+        yumlogger = _YumLogger()
         yumbase.processTransaction(rpmDisplay=yumlogger)
         yumlogger.log_accumulated_errors()
         yumbase.closeRpmDB()
@@ -619,18 +656,23 @@ def remove(name=None, pkgs=None, **kwargs):
 
     # same comments as in upgrade for remove.
     for target in targets:
-        if __grains__.get('cpuarch', '') == 'x86_64' \
-                and target.endswith('.i686'):
-            target = target[:-5]
-            arch = 'i686'
+        if __grains__.get('cpuarch', '') == 'x86_64':
+            try:
+                arch = re.search(r'(\.i\d86)$', target).group(1)
+            except AttributeError:
+                arch = None
+            else:
+                # Remove arch from pkgname
+                target = target[:-len(arch)]
+                arch = arch.lstrip('.')
         else:
             arch = None
         yumbase.remove(name=target, arch=arch)
 
     log.info('Resolving dependencies')
     yumbase.resolveDeps()
-    yumlogger = _YumErrorLogger()
     log.info('Processing transaction')
+    yumlogger = _YumLogger()
     yumbase.processTransaction(rpmDisplay=yumlogger)
     yumlogger.log_accumulated_errors()
     yumbase.closeRpmDB()

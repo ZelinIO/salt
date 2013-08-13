@@ -26,7 +26,7 @@ Full Table of Contents
     topics/virt/*
     topics/tests/*
     topics/reactor/*
-    topics/style
+    topics/conventions/*
     topics/git/*
     topics/development/index
 
@@ -66,6 +66,7 @@ Full Table of Contents
     ref/cli/salt-cp
     ref/cli/salt-call
     ref/cli/salt-run
+    ref/cli/salt-ssh
     ref/cli/salt-syndic
 
     topics/releases/index

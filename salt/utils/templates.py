@@ -49,8 +49,13 @@ def wrap_tmpl_func(render_str):
             if from_str:
                 tmplstr = tmplsrc
             else:
-                with codecs.open(tmplsrc, 'r', SLS_ENCODING) as tmplsrc:
-                    tmplstr = tmplsrc.read()
+                try:
+                    with codecs.open(tmplsrc, 'r', SLS_ENCODING) as _tmplsrc:
+                        tmplstr = _tmplsrc.read()
+                except (UnicodeDecodeError, ValueError) as exc:
+                    log.error('Exception ocurred while reading file {0}: {1}'
+                              .format(tmplsrc, exc))
+                    raise exc
         else:  # assume tmplsrc is file-like.
             tmplstr = tmplsrc.read()
             tmplsrc.close()
@@ -155,7 +160,7 @@ def render_wempy_tmpl(tmplstr, context, tmplpath=None):
     return Template(tmplstr).render(**context)
 
 
-def py(sfn, string=False, **kwargs):  # pylint: disable-msg=C0103
+def py(sfn, string=False, **kwargs):  # pylint: disable=C0103
     '''
     Render a template from a python source file
 

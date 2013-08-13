@@ -17,6 +17,7 @@ import time
 import traceback
 import sys
 import signal
+from random import randint
 
 # Import third party libs
 import zmq
@@ -52,8 +53,8 @@ log = logging.getLogger(__name__)
 # 2. Generate the function mapping dict
 # 3. Authenticate with the master
 # 4. Store the AES key
-# 5. connect to the publisher
-# 6. handle publications
+# 5. Connect to the publisher
+# 6. Handle publications
 
 
 def resolve_dns(opts):
@@ -69,7 +70,8 @@ def resolve_dns(opts):
         # Because I import salt.log below I need to re-import salt.utils here
         import salt.utils
         try:
-            ret['master_ip'] = salt.utils.dns_check(opts['master'], True, opts['ipv6'])
+            ret['master_ip'] = \
+                    salt.utils.dns_check(opts['master'], True, opts['ipv6'])
         except SaltClientError:
             if opts['retry_dns']:
                 while True:
@@ -100,16 +102,13 @@ def resolve_dns(opts):
 
 def get_proc_dir(cachedir):
     '''
-    Return the directory that process data is stored in
+    Given the cache directory, return the directory that process data is
+    stored in, creating it if it doesn't exist.
     '''
     fn_ = os.path.join(cachedir, 'proc')
     if not os.path.isdir(fn_):
         # proc_dir is not present, create it
         os.makedirs(fn_)
-    else:
-        # proc_dir is present, clean out old proc files
-        for proc_fn in os.listdir(fn_):
-            os.remove(os.path.join(fn_, proc_fn))
     return fn_
 
 
@@ -521,6 +520,13 @@ class Minion(object):
         try:
             data = self.crypticle.loads(load)
         except AuthenticationError:
+            # decryption of the payload failed, try to re-auth but wait
+            # random seconds if set in config with random_reauth_delay
+            if 'random_reauth_delay' in self.opts:
+                reauth_delay = randint(0, int(self.opts['random_reauth_delay']))
+                log.debug("Waiting {0} seconds to re-authenticate".format(reauth_delay))
+                time.sleep(reauth_delay)
+
             self.authenticate()
             data = self.crypticle.loads(load)
         # Verify that the publication is valid
@@ -529,8 +535,9 @@ class Minion(object):
             return
         # Verify that the publication applies to this minion
         if 'tgt_type' in data:
-            if not getattr(self.matcher,
-                           '{0}_match'.format(data['tgt_type']))(data['tgt']):
+            match_func = getattr(self.matcher,
+                                 '{0}_match'.format(data['tgt_type']), None)
+            if match_func is None or not match_func(data['tgt']):
                 return
         else:
             if not self.matcher.glob_match(data['tgt']):
@@ -646,13 +653,10 @@ class Minion(object):
             except TypeError as exc:
                 trb = traceback.format_exc()
                 aspec = _getargs(minion_instance.functions[data['fun']])
-                log.warning(('TypeError encountered executing {0}. See debug '
-                             'log for more info.  Possibly a missing '
-                             'arguments issue:  {1}').format(function_name,
-                                                             aspec))
-                msg = 'Missing arguments executing "{0}": {1}'.format(
-                    function_name, aspec
-                )
+                msg =('TypeError encountered executing {0}: {1}. See '
+                      'debug log for more info.  Possibly a missing '
+                      'arguments issue:  {2}').format(function_name, exc,
+                                                      aspec)
                 log.warning(msg)
                 log.debug(
                     'TypeError intercepted: {0}\n{1}'.format(exc, trb),
@@ -829,13 +833,20 @@ class Minion(object):
             )
         )
         auth = salt.crypt.Auth(self.opts)
+        acceptance_wait_time = self.opts['acceptance_wait_time']
+        acceptance_wait_time_max = self.opts['acceptance_wait_time_max']
+        if not acceptance_wait_time_max:
+            acceptance_wait_time_max = acceptance_wait_time
         while True:
             creds = auth.sign_in(timeout, safe)
             if creds != 'retry':
                 log.info('Authentication with master successful!')
                 break
             log.info('Waiting for minion key to be accepted by the master.')
-            time.sleep(self.opts['acceptance_wait_time'])
+            time.sleep(acceptance_wait_time)
+            if acceptance_wait_time < acceptance_wait_time_max:
+                acceptance_wait_time += acceptance_wait_time
+                log.debug('Authentication wait time is {0}'.format(acceptance_wait_time))
         self.aes = creds['aes']
         self.publish_port = creds['publish_port']
         self.crypticle = salt.crypt.Crypticle(self.opts, self.aes)
@@ -950,13 +961,36 @@ class Minion(object):
         self.socket = self.context.socket(zmq.SUB)
         self.socket.setsockopt(zmq.SUBSCRIBE, '')
         self.socket.setsockopt(zmq.IDENTITY, self.opts['id'])
-        if self.opts['ipv6'] is True and hasattr(zmq, 'IPV4ONLY'):
-            # IPv6 sockets work for both IPv6 and IPv4 addresses
-            self.socket.setsockopt(zmq.IPV4ONLY, 0)
+
+        recon_delay = self.opts['recon_default']
+
+        if self.opts['recon_randomize']:
+            recon_delay = randint(self.opts['recon_default'],
+                                  self.opts['recon_default'] + self.opts['recon_max']
+                          )
+
+            log.debug("Generated random reconnect delay between '{0}ms' and '{1}ms' ({2})".format(
+                self.opts['recon_default'],
+                self.opts['recon_default'] + self.opts['recon_max'],
+                recon_delay)
+            )
+
+        log.debug("Setting zmq_reconnect_ivl to '{0}ms'".format(recon_delay))
+        self.socket.setsockopt(zmq.RECONNECT_IVL, recon_delay)
+
         if hasattr(zmq, 'RECONNECT_IVL_MAX'):
+            log.debug("Setting zmq_reconnect_ivl_max to '{0}ms'".format(
+                self.opts['recon_default'] + self.opts['recon_max'])
+            )
+
             self.socket.setsockopt(
                 zmq.RECONNECT_IVL_MAX, self.opts['recon_max']
             )
+
+        if self.opts['ipv6'] is True and hasattr(zmq, 'IPV4ONLY'):
+            # IPv6 sockets work for both IPv6 and IPv4 addresses
+            self.socket.setsockopt(zmq.IPV4ONLY, 0)
+
         if hasattr(zmq, 'TCP_KEEPALIVE'):
             self.socket.setsockopt(
                 zmq.TCP_KEEPALIVE, self.opts['tcp_keepalive']
@@ -987,9 +1021,10 @@ class Minion(object):
 
         # Make sure to gracefully handle CTRL_LOGOFF_EVENT
         salt.utils.enable_ctrl_logoff_handler()
-        
+
         # On first startup execute a state run if configured to do so
         self._state_run()
+        time.sleep(.5)
 
         loop_interval = int(self.opts['loop_interval'])
         while True:
@@ -1119,8 +1154,6 @@ class Minion(object):
             self.socket.close()
         if hasattr(self, 'context') and self.context.closed is False:
             self.context.term()
-        if hasattr(self, 'local'):
-            del self.local
 
     def __del__(self):
         self.destroy()
@@ -1293,6 +1326,14 @@ class Syndic(Minion):
                     'An exception occurred while polling the syndic',
                     exc_info=True
                 )
+
+    def destroy(self):
+        '''
+        Tear down the syndic minion
+        '''
+        super(Syndic, self).destroy()
+        if hasattr(self, 'local'):
+            del self.local
 
 
 class Matcher(object):

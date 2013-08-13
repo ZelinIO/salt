@@ -60,11 +60,15 @@ def latest_version(*names, **kwargs):
     if len(names) == 0:
         return ''
 
+    # Initialize the return dict with empty strings
+    ret = {}
+    for name in names:
+        ret[name] = ''
+
     # Refresh before looking for the latest version available
     if salt.utils.is_true(kwargs.get('refresh', True)):
         refresh_db()
 
-    ret = {}
     pkgs = list_pkgs()
     for name in names:
         candidate = '0'
@@ -170,14 +174,7 @@ def version(*names, **kwargs):
     win_names = []
     ret = {}
     if len(names) == 1:
-        versions = _get_package_info(names[0])
-        if versions:
-            for val in versions.itervalues():
-                if 'full_name' in val and len(val.get('full_name', '')) > 0:
-                    win_names.append(val.get('full_name', ''))
-        else:
-            win_names.append(names[0])
-        val = __salt__['pkg_resource.version'](win_names[0], **kwargs)
+        val = __salt__['pkg_resource.version'](*names, **kwargs)
         if len(val):
             return val
         return ''

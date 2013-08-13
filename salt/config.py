@@ -91,6 +91,7 @@ VALID_OPTS = {
     'state_verbose': bool,
     'state_output': str,
     'acceptance_wait_time': float,
+    'acceptance_wait_time_max': float,
     'loop_interval': float,
     'dns_check': bool,
     'verify_env': bool,
@@ -101,6 +102,8 @@ VALID_OPTS = {
     'update_restart_services': list,
     'retry_dns': float,
     'recon_max': float,
+    'recon_default': float,
+    'recon_randomize': float,
     'win_repo_cachefile': str,
     'pidfile': str,
     'range_server': str,
@@ -126,6 +129,7 @@ VALID_OPTS = {
     'client_acl_blacklist': dict,
     'external_auth': dict,
     'token_expire': int,
+    'file_recv': bool,
     'file_ignore_regex': bool,
     'file_ignore_glob': bool,
     'fileserver_backend': list,
@@ -211,6 +215,7 @@ DEFAULT_MINION_OPTS = {
     'state_verbose': True,
     'state_output': 'full',
     'acceptance_wait_time': 10,
+    'acceptance_wait_time_max': 0,
     'loop_interval': 1,
     'dns_check': True,
     'verify_env': True,
@@ -221,6 +226,8 @@ DEFAULT_MINION_OPTS = {
     'update_restart_services': [],
     'retry_dns': 30,
     'recon_max': 5000,
+    'recon_default': 100,
+    'recon_randomize': False,
     'win_repo_cachefile': 'salt://win/repo/winrepo.p',
     'pidfile': '/var/run/salt-minion.pid',
     'range_server': 'range:80',
@@ -264,6 +271,7 @@ DEFAULT_MASTER_OPTS = {
     'client_acl_blacklist': {},
     'external_auth': {},
     'token_expire': 43200,
+    'file_recv': False,
     'file_buffer_size': 1048576,
     'file_ignore_regex': None,
     'file_ignore_glob': None,
@@ -283,6 +291,7 @@ DEFAULT_MASTER_OPTS = {
     'ext_job_cache': '',
     'master_ext_job_cache': '',
     'minion_data_cache': True,
+    'enforce_mine_cache': False,
     'ipv6': False,
     'log_file': '/var/log/salt/master',
     'log_level': None,
@@ -358,6 +367,11 @@ def _validate_opts(opts):
                     errors.append(
                         err.format(key, val, type(val), VALID_OPTS[key])
                     )
+                except TypeError:
+                    errors.append(
+                        err.format(key, val, type(val), VALID_OPTS[key])
+                    )
+
     for error in errors:
         log.warning(error)
     if errors:
@@ -392,7 +406,7 @@ def _read_conf_file(path):
         return conf_opts
 
 
-def load_config(path, env_var):
+def load_config(path, env_var, default_path=None):
     '''
     Returns configuration dict from parsing either the file described by
     ``path`` or the environment variable described by ``env_var`` as YAML.
@@ -402,13 +416,31 @@ def load_config(path, env_var):
         # defaults, not actually loading the whole configuration.
         return {}
 
+    if default_path is None:
+        # This is most likely not being used from salt, ie, could be salt-cloud
+        # or salt-api which have not yet migrated to the new default_path
+        # argument. Let's issue a warning message that the environ vars won't
+        # work.
+        import inspect
+        previous_frame = inspect.getframeinfo(inspect.currentframe().f_back)
+        log.warning(
+            'The function \'{0}()\' defined in {1!r} is not yet using the '
+            'new \'default_path\' argument to `salt.config.load_config()`. '
+            'As such, the {2!r} environment variable will be ignored'.format(
+                previous_frame.function, previous_frame.filename, env_var
+            )
+        )
+        # In this case, maintain old behaviour
+        default_path = DEFAULT_MASTER_OPTS['conf_file']
+
     # Default to the environment variable path, if it exists
     env_path = os.environ.get(env_var, path)
     if not env_path or not os.path.isfile(env_path):
         env_path = path
     # If non-default path from `-c`, use that over the env variable
-    if path != DEFAULT_MASTER_OPTS['conf_file']:
+    if path != default_path:
         env_path = path
+
     path = env_path
 
     # If the configuration file is missing, attempt to copy the template,
@@ -513,7 +545,7 @@ def minion_config(path,
     if defaults is None:
         defaults = DEFAULT_MINION_OPTS
 
-    overrides = load_config(path, env_var)
+    overrides = load_config(path, env_var, DEFAULT_MINION_OPTS['conf_file'])
     default_include = overrides.get('default_include',
                                     defaults['default_include'])
     include = overrides.get('include', [])
@@ -645,7 +677,7 @@ def master_config(path, env_var='SALT_MASTER_CONFIG', defaults=None):
     if defaults is None:
         defaults = DEFAULT_MASTER_OPTS
 
-    overrides = load_config(path, env_var)
+    overrides = load_config(path, env_var, DEFAULT_MASTER_OPTS['conf_file'])
     default_include = overrides.get('default_include',
                                     defaults['default_include'])
     include = overrides.get('include', [])
@@ -773,7 +805,9 @@ def client_config(path, env_var='SALT_CLIENT_CONFIG', defaults=None):
     # Update with the users salt dot file or with the environment variable
     opts.update(
         load_config(
-            os.path.expanduser('~/.salt'), env_var
+            os.path.expanduser('~/.salt'),
+            env_var,
+            os.path.expanduser('~/.salt')
         )
     )
     # Make sure we have a proper and absolute path to the token file
